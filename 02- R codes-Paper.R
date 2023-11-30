@@ -1,0 +1,810 @@
+
+##                 R and OpenBUGS Code for Thesis-Paper 1: 
+#   "Comparison Performance of the Bayesian Approach with the Weibull
+#   and Birnbaum-Saunders Distributions in Imputation of Time-to-Event Censors"
+
+# -------------------------------------------------------------------------
+
+## 1-Run the Bayesian Approach with the Weibull distribution.
+
+# -------------------------------------------------------------------------
+
+
+{
+  rm(list = ls())
+  # Install packages:survival & R2openBUGS.
+  library(survival)
+  library(R2OpenBUGS)
+  library(coda)
+  # Set working directory and modelfile.
+  getwd()
+  bugswd = paste0(getwd(),"/bugswd"); bugswd
+  modelfile = paste0(bugswd,"/modelfile.txt"); modelfile
+  # Generate Data
+  set.seed(12345)
+  n = 200  # n=100; 200; 300
+  x = rep(0:1, c(0.50*n, 0.50*n))  # Weibull scale parameter related to x.
+  table(x)
+  shape = 2  # Shape: 0.5; 1; 2
+  b = c(-3, 0.3) # set b1 and b2 with table 2 in the paper.
+  lambda = exp(b[1] + b[2]*x)   # Link the parameter to covariate x .
+  summary(lambda)
+  scale = lambda^(-1/shape)   # Since weibull formulla in winbugs is different to R, we need to convert
+  # formula to get similar results.
+  summary(scale)   # Mean scale parameter is near to 4.
+  #Generate Observed time
+  y = rweibull(n,shape, scale )    
+  summary(y)
+  range(y)
+  # Generate censored time
+  delta1 = rep(1,n)   # to make censored data
+  cen = rexp(n,0.06)             # Censored time
+  delta = as.numeric(y < cen)
+  cenper = 1 - mean(delta); cenper   # Get percent of censoring
+  # Merge observed and censored time.
+  z = pmin(y,cen)  # to select observed time or censored time. Every one that is lesser than other.
+  # make variable "t" as observed time and variable "c" as censored time to use in BUGS.
+  t <- ifelse(delta == 1, z, NA)
+  c <- ifelse(delta == 1, 0, z)
+  # Run model in BUGS.
+  modeltext = "model {
+        for(i in 1:n){
+          t[i] ~ dweib(shape,lambda[i])C(c[i], )
+        	log(lambda[i]) <- b[1]+b[2]*x[i]
+          cim[i] <- step(c[i]-1.0E-5)*pow(log(2)/lambda[i]+pow(c[i],shape), 1/shape)
+          }
+        	# priors
+        	shape ~ dgamma(0.01,0.01)  # Non-informative prior
+        	for(j in 1:2) {b[j]~dnorm(0,0.01)}		
+        }
+        "
+  # write BUGS output into file.
+  cat(modeltext, file = modelfile) #file.show(modelfile)
+  modeldata = list(n = n, x = x, t = t, c = c)
+  modelinit = list(list(b = rep(0,length(b)), shape = shape))
+  param = c("shape","b","cim")
+  # bugs ----------------------------------------
+  bugsOut <- bugs(
+    working.directory = bugswd,
+    model.file = modelfile,
+    data = modeldata,
+    inits = modelinit,
+    #inits = NULL,
+    parameters.to.save = param,
+    n.chains = 1,
+    n.iter = 11000,
+    n.burnin = 1000,
+    n.thin = 20
+    #, debug = TRUE
+    #, codaPkg = TRUE
+  )
+  # output ----------------------------------------
+  bugsOut$DIC
+  # Which records is censored:
+  ic = which(delta==0); ic; length(ic)
+  # Dimension of output:
+  dim(bugsOut$sims.array)
+  # Describe censored simulations.
+  bugsOut$summary[c(1:3,3+ic),c(1,2)] 
+  # Describe parameter simulations:
+  parsim1 = bugsOut$sims.array[,1,1:3]   #parameter simulation
+  parsim1[1:5,]  # Only five rows of 10.000 simulation for parameters.
+  # print median of simulations for every censor that replaced.
+  bugsOut$median$cim[ic]  
+  #
+  
+  
+  
+  
+  ### Convergence: Geweke diagnostics
+  geweke.diag(parsim1, frac=0.10, frac2 = 0.50)   #Z-score
+  
+  
+  
+  ### Generate and save necessary files:  
+  
+  write.csv(parsim1, file = "matparsim1.csv")
+  mcmcparsim1 <- mcmc(as.matrix(parsim1))
+  
+  
+  ### ACF computations
+  
+  autocorr.diag(mcmcparsim1)
+  
+  
+  ### Effective Sample Size (ESS)
+  
+  effectiveSize(parsim1)
+  
+  
+  ### Figures 8 in the paper.
+  
+  # Kaplan-Meier Curve:
+  curve1 = survfit(Surv(z,delta) ~ x); curve1
+  plot(curve1, mark.time = TRUE,lty = 1,conf.int = FALSE,  col = "black",
+       main = paste("t~Weibull(2,4), c~Exp(0.06), p=0.20, n=200") ) 
+  
+  # Curve with Median of Simulated Times
+  # output ----------------------------------------
+  # imputation      h=hat
+  bh = bugsOut$mean$b; bh
+  shapeh = bugsOut$mean$shape; shapeh
+  lambdah = exp(bh[1] + bh[2]*x); lambdah #every person has specific lambda because it has specific X.
+  scaleh = lambdah^(-1/shapeh); scaleh
+  # Compute median of Simulations.
+  zmed = qweibull(.5*pweibull(cen,shapeh,scaleh, lower.tail = FALSE),shapeh, scaleh, lower.tail = FALSE)
+  
+  zimp = rep(NA,n)
+  zimp[ic] = zmed[ic]
+  zimp[-ic] = z[-ic]  # zimp = failure times+imputed censored times
+  
+  curve2 = survfit(Surv(zimp,delta1) ~ x); curve2     # Bayesian Imputation
+  lines(curve2, mark.time = TRUE, col = "Blue", lty = 1)
+  
+  #Curve without Censored Times 
+  tOC = z[delta==1]   #time omitting censored
+  deltaOC = rep(1, length(tOC))
+  curve3 = survfit(Surv(tOC, deltaOC) ~ x[delta==1]); curve3       # Omitting_Censored
+  lines(curve3, mark.time = TRUE, col = "Red", lty = 1)
+  
+  legend("topright", c("Kaplan-Meier Curve", "Curve with Median of Simulated Times", "Curve without Censored Times"),
+         lty= 1, col = c("black", "Blue", "Red"), cex = 0.7)
+
+
+  
+    ### Figure 9 in the paper. 
+
+  
+  # Kaplan-Meier Curve:  
+  km1 = survfit(Surv(z,delta) ~ x); km1
+  plot(km1, mark.time = TRUE,lty = 1, lwd =2, col = "black",
+       main = paste("t~Weibull(2,4), c~Exp(0.06), p=0.20, n=200"))  #KM_Estimation
+  
+  # Curve for 10,000 Times Imputation. 
+  timp=t
+  impsim = bugsOut$sims.array[,1,3+ic]
+  for (i in 1:nrow(impsim)) {
+    timp[ic] <- impsim[i,]
+    kmi = survfit(Surv(timp,delta1) ~ x)
+    lines(kmi, mark.time = TRUE, col = "gray", lty = 1)    # n time Imputation
+    
+  }
+  # Curve for Imputations Mean
+  timp[ic] <- colMeans(impsim)
+  kmmean = survfit(Surv(timp,delta1) ~ x)
+  lines(kmi, mark.time = TRUE, col = "blue", lty = 2, lwd = 2)  # Mean of n times Imputation
+  
+  lines(km1, mark.time = TRUE,lty = 1, lwd =2, col = "black",
+        main = paste("t~Weibull(2,4), c~Exp(0.20), p=0.50, n=200"))  #KM_Estimation
+  
+  
+  legend("topright", 
+         c("Kaplan-Meier Curve", "Curve for 10,000 Times Imputation", "Curve for Imputations Mean"),
+         lty = 1, col = c("Black", "gray","blue"), cex = .7)
+  
+  
+}
+
+
+
+
+
+# -------------------------------------------------------------------------
+
+## 2-Run the Bayesian Approach with the Birnbaum-Saunders (BS) distribution.
+
+# -------------------------------------------------------------------------
+
+{ 
+  library(survival)
+  library(R2OpenBUGS)
+  library(coda)
+  
+  # Set working directory and modelfile.
+  getwd()
+  bugswd = paste0(getwd(),"/bugswd"); bugswd
+  modelfile = paste0(bugswd,"/modelfile.txt"); modelfile
+  
+  # generate Data
+  set.seed(12345)
+  n = 200 # n=100; 200; 300
+  x = rep(0:1, c(0.50*n, 0.50*n))  # BS scale parameter related to x.
+  table(x)
+  shape = 2    # Shape: 0.5; 1; 2                   
+  b = c(1.37, 0.15)  # set b1 and b2 with table 4 in the paper.
+  lambda = exp(b[1] + b[2]*x)
+  summary(lambda)
+  scale = lambda             
+  # Define rbn to generate numbers from BS distribution.
+  rbn <- function(n, shape, scale){    # shape = a, scale = b
+    x <- rnorm(n, 0, shape/2)
+    t <- scale * (1 + 2 * x^2 + 2 * x * sqrt(1 + x^2))
+    return(t)
+  }
+  #Generate Observed time
+  y <- rbn(n, shape, lambda)
+  # Generate censored time
+  delta1 = rep(1,n)
+  ## Important Note: Censoring Percent: try to set >21%
+  cen = rexp(n,0.022)             
+  delta = as.numeric(y < cen)
+  cenper = 1 - mean(delta); cenper   # % censoring
+  # Merge observed and censored time.
+  z = pmin(y,cen)
+  # make variable "t" as observed time and variable "c" as censored time to use in BUGS.
+  t <- ifelse(delta == 1, z, NA)
+  c <- ifelse(delta == 1, 0, z)
+  # Run model in BUGS.
+  modeltext = "model {
+    for(i in 1:n){
+    	t[i] ~ dbs(shape, lambda[i])C(c[i], )
+    	log(lambda[i]) <- b[1]+b[2]*x[i]
+      cim[i] <- step(c[i]-1.0E-5)*lambda[i]
+      
+      }
+    	# priors
+    	shape ~ dgamma(0.01,0.01)
+    	for(j in 1:2) {b[j]~dnorm(0,0.01)}		
+    }
+    "
+  # write BUGS output into file.
+  cat(modeltext, file = modelfile) #file.show(modelfile)
+  modeldata = list(n = n, x = x, t = t, c = c)
+  modelinit = list(list(b = rep(0,length(b)), shape = shape))
+  param = c("shape","b","cim")
+  # bugs ----------------------------------------
+  bugsOut <- bugs(
+    working.directory = bugswd,
+    model.file = modelfile,
+    data = modeldata,
+    inits = modelinit,
+    #inits = NULL,
+    parameters.to.save = param,
+    n.chains = 1,
+    n.iter = 11000,
+    n.burnin = 1000,
+    n.thin = 20
+    #, debug = TRUE
+    #, codaPkg = TRUE
+  )
+  # output ----------------------------------------
+  bugsOut$DIC
+  # Which records is censored:
+  ic = which(delta==0); ic
+  # Dimension of output:
+  dim(bugsOut$sims.array)
+  # Describe censored simulations.
+  bugsOut$summary[c(1:3,3+ic),c(1,2)]  
+  # Describe parameter simulations:
+  parsim2 = bugsOut$sims.array[,1,1:3]    #parameter simulation
+  parsim2[1:5,]  # Only five rows of 10.000 simulation for parameters.
+  
+  
+  
+  ### Convergence: Geweke diagnostics
+  
+  geweke.diag(parsim2, frac=0.10, frac2 = 0.50)   #Z-score
+  
+  
+  ### Generate and save necessary files:  
+  write.csv(parsim2, file = "matparsim2.csv")
+  mcmcparsim2 <- mcmc(as.matrix(parsim2))
+  
+  
+  ### ACF computations
+  autocorr.diag(mcmcparsim2)
+  
+  
+  ### Effective Sample Size (ESS)
+  effectiveSize(parsim2)
+  
+  
+  ### Figures 10 in the paper.
+  
+  # Kaplan-Meier Curve:
+  curve1 = survfit(Surv(z,delta) ~ x); curve1
+  plot(curve1, mark.time = TRUE,lty = 1,conf.int = FALSE,  col = "black",
+       main = paste("t~BS(2,4), c~Exp(0.02), p=0.20, n=200") )  #KM_Estimation
+  # Curve with Median of Simulated Times
+  # output ----------------------------------------
+  # imputation      h=hat
+  bh = bugsOut$mean$b; bh
+  shapeh = bugsOut$mean$shape; shapeh
+  lambdah = exp(bh[1] + bh[2]*x); lambdah #every person has specific lambda because it has specific X.
+  scaleh = lambdah; scaleh
+  
+  #install.packages("extraDistr")
+  library(extraDistr)
+  # Compute median of Simulations.
+  zmed = qfatigue(.5*pfatigue(cen,shapeh,scaleh, mu = 0, lower.tail = FALSE),shapeh, scaleh,mu = 0, lower.tail = FALSE)
+  zmed
+  # Make a variable include median of simulations.
+  zimp = rep(NA,n)
+  zimp[ic] = zmed[ic]
+  zimp[-ic] = z[-ic]  # zimp = failure times+imputed censored times
+  
+  
+  #
+  curve2 = survfit(Surv(zimp,delta1) ~ x); curve2
+  lines(curve2, mark.time = TRUE, col = "Blue", lty = 1)
+  
+  #Curve without Censored Times 
+  tOC = z[delta==1]
+  deltaOC = rep(1, length(tOC))
+  curve3 = survfit(Surv(tOC, deltaOC) ~ x[delta==1]); curve3
+  lines(curve3, mark.time = TRUE, col = "Red", lty = 1)
+  
+  legend("topright", c("Kaplan-Meier Curve", "Curve with Median of Simulated Times", "Curve without Censored Times"),
+         lty= 1, col = c("black", "Blue", "Red"), cex = 0.7)
+  
+  
+  
+  ### Figure 11 in the paper.
+  
+  # Kaplan-Meier Curve:  
+  curve1 = survfit(Surv(z,delta) ~ x); curve1
+  plot(curve1, mark.time = TRUE,lty = 1, lwd = 2, col = "black", 
+       main = paste("t~BS(2,4), c~Exp(0.02), p=0.20, n=200"))  #KM_Estimation
+  
+  # Curve for 10,000 Times Imputation
+  timp=t
+  impsim = bugsOut$sims.array[,1,3+ic]  
+  for (i in 1:nrow(impsim)) {
+    timp[ic] <- impsim[i,]
+    kmi = survfit(Surv(timp,delta1) ~ x)
+    lines(kmi, mark.time = TRUE, col = "gray", lty = 1)    # n time Imputation
+    
+  }
+  # Curve for Imputations Mean
+  timp[ic] <- colMeans(impsim)
+  kmmean = survfit(Surv(timp,delta1) ~ x)
+  lines(kmi, mark.time = TRUE, col = "blue", lty = 2, lwd = 2)  # Mean of n times Imputation
+  
+  lines(curve1, mark.time = TRUE,lty = 1, lwd = 2, col = "black", 
+        main = paste("t~BS(2,4), c~Exp(0.01), p=0.10, n=200"))  #KM_Estimation
+  
+  
+  legend("topright", 
+         c("Kaplan-Meier Curve", "Curve for 10,000 times Imputation", "Curve for Imputations Mean"),
+         lty = 1, col = c("Black", "gray","blue"), cex = .7)
+
+}
+
+
+
+
+
+# -------------------------------------------------------------------------
+
+## 3-Run the Bayesian Approach on the Breast Cancer Data distributed as the Weibull.
+
+# -------------------------------------------------------------------------
+
+{
+  # Install packages:survival & R2openBUGS.
+  library(survival)
+  library(R2OpenBUGS)
+  # Set working directory and modelfile.
+  getwd()
+  bugswd = paste0(getwd(),"/bugswd"); bugswd
+  modelfile = paste0(bugswd,"/modelfile.txt"); modelfile
+  # Import and define variables in Data.
+  breast <- read.table("Data_Paper1.txt", header = TRUE)
+  t <- breast$t 
+  c <- breast$c
+  x <- breast$AgeC
+  length(t[t == "NA"])/length(t)   # Percent of Censoring, 88 Censor, 40% 
+  length(c[c == "0"])/length(c)   # Percent of Observed
+  n = length(t); n
+  z = breast$z   # Composed from Observed and Censored data
+  delta = breast$delta   # delta=0 means Censoring
+  ic = which(delta == "0")   # indicator censor
+  age <- breast$AgeC
+  # Run model in BUGS.
+  modeltext = "model {
+      for(i in 1:n){
+      t[i] ~ dweib(shape,lambda)C(c[i], )
+      cim[i]<-step(c[i]-1.0E-5)*pow(log(2)/lambda+pow(c[i],shape),1/shape)  
+      }
+    	# priors
+    	shape ~ dgamma(0.01,0.01)
+    	lambda ~ dgamma(0.01, 0.01)
+  	}
+    "
+  # write BUGS output into file.
+  cat(modeltext, file = modelfile) #file.show(modelfile)
+  modeldata = list(n = n, t = t, c = c)
+  modelinit = list(list(shape = 1, lambda = 1 ))
+  param = c("shape","lambda", "cim")
+  # bugs ----------------------------------------
+  bugsOut <- bugs(
+    working.directory = bugswd,
+    model.file = modelfile,
+    data = modeldata,
+    inits = modelinit,
+    #inits = NULL,
+    parameters.to.save = param,
+    n.chains = 1,
+    n.iter = 11000,
+    n.burnin = 1000,
+    n.thin = 20
+    #, debug = TRUE
+    #, codaPkg = TRUE
+  )
+  
+  # output ----------------------------------------
+  bugsOut$DIC
+  # Dimension of output:
+  dim(bugsOut$sims.array)   #composed: alpha, lambda, 88 simulation,deviance = 91 columns.
+  # Describe censored simulations.
+  bugsOut$sims.array[1:5,1,3:90]         # Head
+  bugsOut$sims.array[9996:10000,1,3:90]  # Tail
+  bugsOut$summary[1:2, c(1:2)]    # mean & sd parameters: alpha & lambda
+  # Describe parameter simulations:
+  parsim3 = bugsOut$sims.array[,1,1:2]   #parameter simulation
+  impsim = bugsOut$sims.array[,1,3:90]  # imputation simulation
+  timp = t
+  
+
+  
+  ### Convergence: Geweke diagnostics.
+  geweke.diag(parsim3, frac=0.10, frac2 = 0.50)   #Z-score
+  
+  
+  ### Generate and save necessary files:  
+  write.csv(parsim3, file = "matparsim3.csv")
+  mcmcparsim3 <- mcmc(as.matrix(parsim3))
+  
+  
+  ### ACF computations
+  autocorr.diag(mcmcparsim3)
+  
+  
+  ### Effective Sample Size (ESS)
+  effectiveSize(parsim3)
+  
+  
+  ### Fiqure 12 in the paper.
+  
+  # Kaplan-Meier Curve:
+  curve1 = survfit(Surv(z,delta) ~ age); curve1
+  plot(curve1, mark.time = TRUE,lty = 1,conf.int = FALSE,  col = "black",
+       main = paste("Posterior Estimate: Shape=1.24,Scale=0.001,DIC=1698"))  #KM_Estimation
+  # Curve with Median of Simulated Times
+  # output ----------------------------------------
+  # imputation      h=hat
+  shapeh = bugsOut$mean$shape; shapeh
+  lambdah = bugsOut$mean$lambda; lambdah
+  cen=c
+  # Compute median of Simulations.
+  library(miscTools)
+  zmed = colMedians(impsim)
+  # 
+  ic = which(delta==0); ic      #index censor to count number of censored case.
+  length(ic)
+  zimp = rep(NA,n)
+  zimp[ic] = zmed[ic]
+  zimp[-ic] = z[-ic]  # zimp = failure times+imputed censored times
+  delta1 = rep(1,n)  # after impute, all of times are observed then we made delta1.
+  #
+  km2 = survfit(Surv(zimp,delta1) ~ x); km2     # Bayesian Imputation
+  lines(km2, mark.time = TRUE, col = "Blue", lty = 1)
+  
+  # Curve without Censored Times
+  tOC = z[delta==1]  # number of observed times
+  deltaOC = rep(1, length(tOC))
+  length(deltaOC)
+  km3 = survfit(Surv(tOC, deltaOC) ~ x[delta==1]); km3       # Omitting_Censored
+  lines(km3, mark.time = TRUE, col = "Red", lty = 1)
+  
+  legend("topright", c("Kaplan-Meier Curve", "Curve with Median of Simulated Times", "Curve without Censored Times"),
+         lty= 1, col = c("black", "Blue", "Red"), cex = 0.7)
+  
+  
+  
+  ### Fiqure 13 in the paper.
+  
+  # Kaplan-Meier Curve
+  curve1 = survfit(Surv(z,delta) ~ x); curve1
+  plot(curve1, mark.time = TRUE,lty = 1, lwd =2, col = "black",
+       main = paste("t~Weibull, p=0.40, n=220"))  #KM_Estimation
+  
+  # Curve with Median of Simulated Times
+  # simulation 
+  for (i in 1:nrow(impsim)) {
+    timp[ic] <- impsim[i,]
+    kmi = survfit(Surv(timp,delta1) ~ x)
+    lines(kmi, mark.time = TRUE, col = "gray", lty = 1)    # n time Imputation
+    #Sys.sleep(.5)
+  }
+  # Curve for Imputations Mean
+  lines(kmi, mark.time = TRUE, col = "blue", lty = 2, lwd = 2)  # Mean of n times Imputation
+  
+  lines(curve1, mark.time = TRUE,lty = 1, lwd =2, col = "black",
+        main = paste("t~Weibull, p=0.40, n=220"))  #KM_Estimation
+  
+  legend("topright", 
+         c("Kaplan-Meier Curve", "Curve for 10,000 Times Imputation", "Curve for Imputations Mean"),
+         lty = 1, col = c("Black", "gray","blue"), cex = .7)
+
+}
+
+
+
+# -------------------------------------------------------------------------
+
+## 4-Run the Bayesian Approach on the Breast Cancer Data distributed as the Birnbaum-Saunders.
+
+# -------------------------------------------------------------------------
+
+
+{
+  # Install packages:survival & R2openBUGS.
+  library(survival)
+  library(R2OpenBUGS)
+  # Set working directory and modelfile.
+  getwd()
+  bugswd = paste0(getwd(),"/bugswd"); bugswd
+  modelfile = paste0(bugswd,"/modelfile.txt"); modelfile
+  # Import and define variables in Data.
+  breast <- read.table("Data_Paper1.txt", header = TRUE)
+  x <- breast$AgeC  
+  t <- breast$t  #time based on month
+  c <- breast$c
+  length(t[t == "NA"])/length(t)   # Percent of Censoring, 88 Censor, 40% 
+  length(c[c == "0"])/length(c)   # Percent of Observed
+  n = length(x); n
+  z = breast$z   # Composed from Observed and Censored data
+  delta = breast$delta   # delta=0 means Censoring
+  ic = which(delta == 0)   # indicator censor
+  length(ic)
+  age <- breast$AgeC
+  # Run model in BUGS.
+  modeltext = "model {
+    for(i in 1:n){
+    t[i] ~ dbs(shape,lambda)C(c[i], )
+    cim[i] <- step(c[i]-1.0E-5)*lambda    #tmed
+    }
+    # priors
+    shape ~ dgamma(0.01,0.01)
+    lambda ~ dgamma(0.01, 0.01)
+    }
+    "
+  # write BUGS output into file.
+  cat(modeltext, file = modelfile) #file.show(modelfile)
+  modeldata = list(n = n, t = t, c = c)
+  modelinit = list(list(shape = 4, lambda = 4))
+  param = c("shape","lambda", "cim")
+  # bugs ----------------------------------------
+  bugsOut <- bugs(
+    working.directory = bugswd,
+    model.file = modelfile,
+    data = modeldata,
+    inits = modelinit,
+    #inits = NULL,
+    parameters.to.save = param,
+    n.chains = 1,
+    n.iter = 11000,
+    n.burnin = 1000,
+    n.thin = 20
+    #, debug = TRUE
+    #, codaPkg = TRUE
+  )
+  
+  # output ----------------------------------------
+  bugsOut$DIC
+  # Dimension of output:
+  dim(bugsOut$sims.array)   #composed: alpha, lambda, 88 simulation,deviance = 91 columns.
+  # Describe censored simulations.
+  bugsOut$sims.array[1:5,1,3:90]  # report 1 till 5 from 100 times censored times simulations.
+  bugsOut$summary[1:2, c(1:2)]    # mean & sd parameters: alpha & lambda
+  # Describe parameter simulations:
+  parsim4 = bugsOut$sims.array[,1,1:2]   #parameter simulation: 10000*2
+  impsim = bugsOut$sims.array[,1,3:90]  # imputation simulation: 10000*88
+  timp = t
+  
+  
+  ### Convergence: Geweke dignostics.
+  geweke.diag(parsim4, frac=0.10, frac2 = 0.50)   #Z-score
+  
+  
+  ### Generate and save necessary files:  
+  write.csv(parsim4, file = "matparsim4.csv")
+  mcmcparsim4 <- mcmc(as.matrix(parsim4))
+  
+  
+  
+  ### ACF computations 
+  autocorr.diag(mcmcparsim4)
+  
+  
+  ### Effective Sample Size (ESS)
+  effectiveSize(parsim4)
+  
+  
+  ### Fiqure 12 in the paper.
+  
+  # Kaplan-Meier Curve:
+  curve1 = survfit(Surv(z,delta) ~ age); curve1
+  plot(curve1, mark.time = TRUE,lty = 1,conf.int = FALSE,  col = "black",
+       main = paste("Posterior Estimate: Shape=1.22, Scale=145.21, DIC=1510"))  #KM_Estimation
+  
+  # Curve with Median of Simulated Times
+  # output ----------------------------------------
+  # imputation      h=hat
+  shapeh = bugsOut$mean$shape; shapeh
+  lambdah = bugsOut$mean$lambda; lambdah
+  scaleh = lambdah; scaleh
+  cen=c
+  # Compute median of Simulations.
+  #install.packages("extraDistr")
+  library(extraDistr)
+  # How calculate median times in Birnbaum-Saunders distribution:
+  zmed = qfatigue(.5*pfatigue(cen,shapeh,scaleh, mu = 0, lower.tail = FALSE),shapeh, scaleh,mu = 0, lower.tail = FALSE)
+  #
+  ic = which(delta==0); ic      #index censor to count number of censored case.
+  zimp <- rep(NA, n)
+  zimp[ic] <- zmed[ic]
+  zimp[-ic] <- z[-ic]  # zimp = failure times+imputed censored times
+  delta1 = rep(1,n)  # after impute, all of times are observed then we made delta1.
+  #
+  curve2 = survfit(Surv(zimp,delta1) ~ x); curve2     # Bayesian Imputation
+  lines(curve2, mark.time = TRUE, col = "Blue", lty = 1)
+  
+  # Curve without Censored Times
+  tOC = z[delta==1]  # number of observed times
+  deltaOC = rep(1, length(tOC))
+  length(deltaOC)
+  curve3 = survfit(Surv(tOC, deltaOC) ~ x[delta==1]); curve3       # Omitting_Censored
+  lines(curve3, mark.time = TRUE, col = "Red", lty = 1)
+  
+  legend("topright", c("Kaplan-Meier Curve", "Curve with Median of Simulated Times", "Curve without Censored Times"),
+         lty= 1, col = c("black", "Blue", "Red"), cex = 0.7)
+  
+  
+  ### Fiqure 13 in the paper.
+  
+  # Kaplan-Meier Curve    
+  curve1 = survfit(Surv(z,delta) ~ x); curve1
+  plot(curve1, mark.time = TRUE,lty = 1, lwd=2, col = "black",
+       main = paste("t~Birnbaum-Saunders, p=0.40, n=220"))  #KM_Estimation
+  # Curve with Median of Simulated Times  
+  # simulation 
+  for (i in 1:nrow(impsim)) {
+    timp[ic] <- impsim[i,]
+    kmi = survfit(Surv(timp,delta1) ~ x)
+    lines(kmi, mark.time = TRUE, col = "gray", lty = 1)    # n time Imputation
+    #Sys.sleep(.5)
+  }
+  # Curve for Imputations Mean
+  timp[ic] <- colMeans(impsim)
+  kmmean = survfit(Surv(timp,delta1) ~ x)
+  lines(kmi, mark.time = TRUE, col = "blue", lty = 2, lwd = 2)  # Mean of n times Imputation
+  
+  lines(curve1, mark.time = TRUE,lty = 1, lwd=2, col = "black",
+        main = paste("t~Birnbaum-Saunders, p=0.40, n=220"))  #KM_Estimation
+  
+  legend("topright", 
+         c("Kaplan-Meier Curve", "Curve for 10,000 Times Imputation", "Curve for Imputations Mean"),
+         lty = 1, col = c("Black", "gray","blue"), cex = .7)
+
+}
+
+
+
+
+# -------------------------------------------------------------------------
+
+##  5- Convergence Geweke Diagnostics: Fig 4 in the paper.
+
+# -------------------------------------------------------------------------
+
+
+
+
+### 5-1 Posterior Density Plot
+
+{
+  library(coda)
+  library(ggplot2)
+  Shape_W <- c(read.csv("matparsim1.csv")[,2])
+  b1_W <- c(read.csv("matparsim1.csv")[,3])
+  b2_W <- c(read.csv("matparsim1.csv")[,4])
+  Shape_BS <- c(read.csv("matparsim2.csv")[,2])
+  b1_BS <- c(read.csv("matparsim2.csv")[,3])
+  b2_BS <- c(read.csv("matparsim2.csv")[,4])
+  Shape_BC_W <- c(read.csv("matparsim3.csv")[,2])
+  Scale_BS_W <- c(read.csv("matparsim3.csv")[,3])
+  Shape_BC_BS <- c(read.csv("matparsim4.csv")[,2])
+  Scale_BC_BS <- c(read.csv("matparsim4.csv")[,3])
+  
+  simulation <- c(Shape_W, b1_W, b2_W,
+                  Shape_BS, b1_BS, b2_BS,
+                  Shape_BC_W,Scale_BS_W,
+                  Shape_BC_BS, Scale_BC_BS
+  )
+  tot_matparsim <- data.frame(Simulation = simulation,
+                              Parameter = rep(c("Shape-W", "b1-W","b2-W",
+                                                "Shape-Bs", "b1-BS", "b2-BS",
+                                                "Shape-BC-W", "Scale-BC-W",
+                                                "Shape-BC-BS", "Scale-BC-BS"),
+                                              each = 10000)) 
+  
+  Dens <- ggplot(data=tot_matparsim, aes(x=Simulation, group = Parameter, fill = Parameter)) +
+    geom_density(alpha = 0.5, adjust = 1.5) + theme_gray() +
+    theme(legend.position="none", panel.spacing = unit(0.1, "lines"),
+          axis.ticks.x=element_blank())  + facet_wrap(~Parameter, scales = "free") 
+  
+  Dens
+}
+
+
+### 5-2 Trace Plot for all of Senrios. Fig 5 in the paper.
+
+{
+  tracedata <- data.frame(read.csv('matparsim1.csv')[,2:4],read.csv('matparsim2.csv')[,2:4],
+                          read.csv('matparsim3.csv')[,2:3],read.csv('matparsim4.csv')[,2:3])
+  names(tracedata) <- c('Shape_W', 'b1_W', 'b2_W',
+                        'Shape_BS', 'b1_BS','b2_BS',
+                        'Shape_BC_W','Scale_BC_W',
+                        'Shape_BC_BS', 'Scale_BC_BS')  
+  
+  layout(matrix(c(1, 2, 3, 4, 5, 6), ncol= 3, nrow = 2, byrow = TRUE))
+  traceplot(as.mcmc(tracedata[,1]), col = "blue")  
+  mtext("Shape-W", side = 3)
+  traceplot(as.mcmc(tracedata[,2]), col = "blue")  
+  mtext("b1-W", side = 3)
+  traceplot(as.mcmc(tracedata[,3]), col = "blue")  
+  mtext("b2-W", side = 3)
+  traceplot(as.mcmc(tracedata[,4]), col = "blue")  
+  mtext("Shape-BS", side = 3)
+  traceplot(as.mcmc(tracedata[,5]), col = "blue")  
+  mtext("b1-BS", side = 3)
+  traceplot(as.mcmc(tracedata[,6]), col = "blue")  
+  mtext("b2-BS", side = 3)
+  layout(matrix(c(1, 2, 3, 4), ncol= 2, nrow = 2, byrow = TRUE))
+  traceplot(as.mcmc(tracedata[,7]), col = "green")  
+  mtext("Shape-BC-W", side = 3)
+  traceplot(as.mcmc(tracedata[,8]), col = "green")  
+  mtext("Scale-BC-W", side = 3)
+  traceplot(as.mcmc(tracedata[,9]), col = "green")  
+  mtext("Shape-BC-BS", side = 3)  
+  traceplot(as.mcmc(tracedata[,10]), col = "green")  
+  mtext("Scale-BC-BS", side = 3)  
+  
+  
+  ### 5-3 ACF PLOT for all of Scenarios. Fig 3 in the paper.
+  tracedata1 <- data.frame(read.csv('matparsim3.csv')[,2:3],
+                           read.csv('matparsim4.csv')[,2:3],
+                           read.csv('matparsim1.csv')[,2:4],
+                           read.csv('matparsim2.csv')[,2:4])
+  names(tracedata1) <- c('Shape_BC_W','Scale_BC_W',
+                         'Shape_BC_BS', 'Scale_BC_BS', 
+                         'Shape_W', 'b1_W', 'b2_W',
+                         'Shape_BS', 'b1_BS','b2_BS')  
+  tracedata2 <- tracedata1[, c(8,1,2,3,4,6,7,5,9,10)]
+  acfplot(as.mcmc(tracedata2), col = "red")
+}
+
+
+### 5-4 Geweke Diagnostics. Figures 6 and 7 in the paper. 
+
+{
+  ## Weibull & BS Scenarios:
+  matparsim1 <- read.csv("Convergence-Total.csv")
+  matparsim1$Censoring <- as.factor(matparsim1$Censoring)
+  
+  library(ggplot2)
+  library(gridExtra)
+  ggplot(data = matparsim1, aes(x = Z.score, y = Parameter, color = Censoring)) +
+    geom_point() + xlim(-2,2) + facet_grid(Scenarios~Sample.Size)
+  
+  # Convergence Plot for Breast Cancer dataset. 
+  library(ggplot2)
+  conv.data <- read.csv("convergence data - BC.csv")
+  graph1 <- ggplot(data = conv.data, aes(x = Zscore, y = Parameter)) +
+    geom_point(color = 'red') 
+  graph2 <- graph1 + xlim(-2,+2) + labs(x = "Z score" , y = "Parameter")
+  graph2
+
+}
