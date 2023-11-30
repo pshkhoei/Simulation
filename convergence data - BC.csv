@@ -1,0 +1,5 @@
+Zscore,Sample Size,Censoring,Parameter
+0.75,220,0.4,Shape-Weibull
+-0.81,220,0.4,Scale-Weibull
+1.67,220,0.4,Shape-BS
+1.23,220,0.4,Scale-BS
